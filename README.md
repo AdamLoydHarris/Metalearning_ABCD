@@ -191,7 +191,4 @@ claude_abcd/
 Based on meta-reinforcement learning principles from:
 - Wang et al. (2016) "Learning to reinforcement learn"
 - Duan et al. (2016) "RL²: Fast Reinforcement Learning via Slow Reinforcement Learning"
-
-Related neuroscience:
-- Hippocampal theta sequences and prospective coding
-- Predictive representations in navigation
+- Wang et al. (2018): Prefrontal corte as a meta-reinforcement learning system
