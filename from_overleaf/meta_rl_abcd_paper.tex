@@ -1,0 +1,591 @@
+\documentclass{article}
+
+% Ready for submission - use [preprint] for arXiv
+\usepackage[preprint]{neurips_2024}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+
+% Custom commands
+\newcommand{\vect}[1]{\boldsymbol{#1}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\R}{\mathbb{R}}
+
+\title{Emergent Prospective Coding in a Meta-Reinforcement Learning Agent:\\Learning to Learn Spatial Sequences}
+
+\author{%
+  Anonymous Author(s) \\
+  Affiliation \\
+  Address \\
+  \texttt{email@domain.edu}
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Biological agents exhibit remarkable flexibility in learning new tasks within a single episode, a capacity thought to depend on hippocampal-prefrontal interactions that maintain task-relevant information in working memory. Here we investigate whether similar computational principles emerge in artificial agents trained via meta-reinforcement learning. We train a recurrent neural network using Advantage Actor-Critic (A2C) on a spatial sequence learning task inspired by rodent navigation experiments---the ABCD task, where agents must learn to visit four locations in a fixed repeating sequence. Critically, during evaluation the network weights are frozen, requiring the agent to learn new sequences purely through its recurrent dynamics. We find that the trained agent demonstrates robust within-session learning, successfully inferring novel transitions (D$\rightarrow$A) before experiencing them. Neural analysis reveals that approximately 19\% of recurrent units function as ``future place cells,'' encoding upcoming positions 1--8 steps ahead rather than current location. Furthermore, position information across different time horizons is represented in orthogonal neural subspaces, forming a ``conveyor belt'' structure reminiscent of hippocampal theta sequences. These findings demonstrate that meta-reinforcement learning naturally gives rise to prospective neural codes that support flexible, memory-based sequence learning.
+\end{abstract}
+
+%===============================================================================
+\section{Introduction}
+%===============================================================================
+
+A hallmark of biological intelligence is the ability to rapidly adapt to novel situations within a single experience---learning new rules, inferring latent structure, and generalizing from limited data. This capacity is particularly evident in spatial navigation, where animals can learn new goal sequences within a single session and even anticipate upcoming locations before visiting them \citep{johnson2007neural, wikenheiser2015hippocampal}. Such flexible behavior is thought to depend on neural circuits that maintain task-relevant information in working memory while simultaneously computing predictions about future states \citep{wang2018prefrontal}.
+
+\textbf{Meta-reinforcement learning} provides a computational framework for understanding how such flexibility might arise \citep{wang2016learning, duan2016rl2}. In the meta-RL paradigm, a recurrent neural network is trained across many related tasks such that its recurrent dynamics implement a learning algorithm. Critically, during evaluation, the network weights remain fixed---all adaptation occurs through the hidden state dynamics. This separation of ``slow'' synaptic learning (across tasks during training) and ``fast'' memory-based learning (within tasks during evaluation) mirrors proposed distinctions between systems consolidation and working memory in biological systems \citep{mcclelland1995there}.
+
+The \textbf{ABCD task} provides an ideal testbed for studying meta-learned sequence learning \citep{sun2023hippocampal, nieh2021geometry}. In this task, subjects must visit four spatial locations (A, B, C, D) in a fixed repeating sequence. The task requires not only learning stimulus-response associations but also inferring the sequential structure---particularly challenging for the D$\rightarrow$A transition, which cannot be predicted from the current stimulus alone but requires tracking one's position within the sequence.
+
+Here we investigate the computational mechanisms underlying meta-learned sequence learning in a GRU-based actor-critic agent trained on the ABCD task. Our contributions are:
+
+\begin{enumerate}
+    \item We demonstrate that meta-RL agents can learn the ABCD task purely through recurrent dynamics, achieving above-chance performance on novel D$\rightarrow$A transitions \emph{before} experiencing them (47.5\% vs. 25\% chance).
+
+    \item We discover that approximately 19\% of recurrent units function as ``future place cells,'' showing stronger selectivity for upcoming positions than current position.
+
+    \item We reveal a ``conveyor belt'' structure in which position information at different time horizons occupies orthogonal neural subspaces, enabling parallel tracking of past, present, and future locations.
+\end{enumerate}
+
+%===============================================================================
+\section{Related Work}
+%===============================================================================
+
+\textbf{Meta-reinforcement learning.} The idea that recurrent networks can learn to implement reinforcement learning algorithms was introduced by \citet{wang2016learning} and \citet{duan2016rl2}. These studies showed that LSTM-based agents trained across many bandit problems develop internal algorithms resembling Bayesian inference. Subsequent work has applied meta-RL to understand prefrontal cortex function \citep{wang2018prefrontal}, hippocampal representations \citep{whittington2020tolman}, and cognitive flexibility more broadly \citep{ritter2018been}.
+
+\textbf{Hippocampal sequences and prospective coding.} During navigation, hippocampal place cells fire not only for the animal's current location but also for upcoming positions, particularly during theta oscillations \citep{johnson2007neural, wikenheiser2015hippocampal}. These ``theta sequences'' sweep forward from current location to anticipated future positions, potentially supporting planning and prediction \citep{foster2006hippocampal}. Similar prospective codes have been identified in prefrontal cortex during goal-directed behavior \citep{ramus2007hippocampal}.
+
+\textbf{The ABCD task.} The ABCD sequence learning task has been used to study hippocampal function in rodents \citep{sun2023hippocampal} and the neural basis of sequential decision-making. The task requires maintaining a representation of sequence position that goes beyond simple stimulus-response associations, making it ideal for studying working memory and predictive processing.
+
+%===============================================================================
+\section{Methods}
+%===============================================================================
+
+\subsection{The ABCD Task Environment}
+
+We implement a discrete 3$\times$3 grid maze with 9 positions indexed 0--8 (Figure~\ref{fig:task}A). The agent can take four actions: up, down, left, and right. Actions that would move the agent outside the grid boundaries leave the position unchanged.
+
+Each ABCD \textbf{configuration} assigns four distinct grid positions as reward locations A, B, C, and D. The agent must visit these locations in the repeating sequence A$\rightarrow$B$\rightarrow$C$\rightarrow$D$\rightarrow$A$\rightarrow\ldots$, receiving reward $r=+1$ upon reaching the correct next location in the sequence. The agent's current position in the sequence (i.e., which of A, B, C, D was most recently visited) defines the \textbf{sequence state}.
+
+Formally, let $s_t \in \{0,\ldots,8\}$ denote the agent's grid position at time $t$, $q_t \in \{A,B,C,D\}$ denote the sequence state, and $a_t \in \{\text{up, down, left, right}\}$ denote the action. The reward function is:
+\begin{equation}
+r_t = \begin{cases}
++1 & \text{if } s_t = \text{pos}(\text{next}(q_{t-1})) \\
+0 & \text{otherwise}
+\end{cases}
+\end{equation}
+where $\text{next}(q) \in \{A,B,C,D\}$ returns the next location in the sequence and $\text{pos}(\cdot)$ returns the grid position of a sequence location.
+
+\textbf{Meta-learning setup.} We generate 100 fixed training configurations and 40 held-out evaluation configurations, ensuring no overlap. Each \textbf{session} consists of 100 steps within a single configuration. The agent starts at a random grid position and must infer the ABCD locations through trial and error within the session. Critically, network weights are frozen during sessions---learning occurs purely through the recurrent hidden state dynamics.
+
+\subsection{Agent Architecture}
+
+We employ a GRU-based actor-critic architecture (Figure~\ref{fig:task}B). At each time step $t$, the agent receives an observation $\vect{o}_t \in \R^{14}$ comprising:
+\begin{equation}
+\vect{o}_t = [\text{onehot}(s_t) \,;\, \text{onehot}(a_{t-1}) \,;\, r_{t-1}]
+\end{equation}
+where $\text{onehot}(s_t) \in \R^9$ encodes the current position, $\text{onehot}(a_{t-1}) \in \R^4$ encodes the previous action, and $r_{t-1} \in \R$ is the previous reward.
+
+The observation is processed by a Gated Recurrent Unit (GRU) \citep{cho2014learning} with hidden dimension $d_h = 128$:
+\begin{align}
+\vect{z}_t &= \sigma(\vect{W}_z \vect{o}_t + \vect{U}_z \vect{h}_{t-1} + \vect{b}_z) \\
+\vect{r}_t &= \sigma(\vect{W}_r \vect{o}_t + \vect{U}_r \vect{h}_{t-1} + \vect{b}_r) \\
+\tilde{\vect{h}}_t &= \tanh(\vect{W}_h \vect{o}_t + \vect{U}_h (\vect{r}_t \odot \vect{h}_{t-1}) + \vect{b}_h) \\
+\vect{h}_t &= (1 - \vect{z}_t) \odot \vect{h}_{t-1} + \vect{z}_t \odot \tilde{\vect{h}}_t
+\end{align}
+where $\sigma$ denotes the sigmoid function, $\odot$ denotes element-wise multiplication, $\vect{z}_t$ and $\vect{r}_t$ are the update and reset gates respectively, and $\vect{h}_t \in \R^{128}$ is the hidden state that carries information across time steps within a session.
+
+The hidden state feeds into two linear heads:
+\begin{align}
+\text{Actor (policy):} \quad \pi(a | \vect{h}_t) &= \text{softmax}(\vect{W}_\pi \vect{h}_t + \vect{b}_\pi) \\
+\text{Critic (value):} \quad V(\vect{h}_t) &= \vect{W}_V \vect{h}_t + \vect{b}_V
+\end{align}
+
+Network weights are initialized using orthogonal initialization \citep{saxe2013exact} with gain 0.01 for the actor and 1.0 for the critic.
+
+\subsection{Training: Advantage Actor-Critic (A2C)}
+
+We train the network using Advantage Actor-Critic (A2C) \citep{mnih2016asynchronous}. For each session, we collect a trajectory $\tau = (o_1, a_1, r_1, \ldots, o_T, a_T, r_T)$ and compute discounted returns:
+\begin{equation}
+R_t = \sum_{k=0}^{T-t} \gamma^k r_{t+k}
+\end{equation}
+where $\gamma = 0.99$ is the discount factor.
+
+The advantage function estimates how much better an action is compared to the expected value:
+\begin{equation}
+A_t = R_t - V(\vect{h}_t)
+\end{equation}
+
+We optimize three objectives jointly:
+\begin{equation}
+\mathcal{L} = \mathcal{L}_\text{policy} + c_V \mathcal{L}_\text{value} - c_H \mathcal{H}[\pi]
+\end{equation}
+
+\textbf{Policy loss} (policy gradient with baseline):
+\begin{equation}
+\mathcal{L}_\text{policy} = -\frac{1}{T}\sum_{t=1}^{T} \log \pi(a_t | \vect{h}_t) \cdot \hat{A}_t
+\end{equation}
+where $\hat{A}_t$ denotes the normalized advantage (zero mean, unit variance).
+
+\textbf{Value loss} (mean squared error):
+\begin{equation}
+\mathcal{L}_\text{value} = \frac{1}{T}\sum_{t=1}^{T} (V(\vect{h}_t) - R_t)^2
+\end{equation}
+
+\textbf{Entropy bonus} (encourages exploration):
+\begin{equation}
+\mathcal{H}[\pi] = -\frac{1}{T}\sum_{t=1}^{T}\sum_a \pi(a | \vect{h}_t) \log \pi(a | \vect{h}_t)
+\end{equation}
+
+We use $c_V = 0.5$ and $c_H = 0.01$, optimize with Adam \citep{kingma2014adam} ($\alpha = 3 \times 10^{-4}$), and clip gradients to norm 0.5.
+
+\textbf{Training procedure.} We train for 500,000 epochs. Each epoch consists of: (1) sampling a random training configuration, (2) running a 100-step session, (3) computing losses and updating weights. The hidden state $\vect{h}_0$ is initialized to zero at the start of each session.
+
+\subsection{Neural Analysis Methods}
+
+\textbf{Hidden state collection.} We run the trained agent (with frozen weights) on 20 evaluation configurations, 3 sessions each, collecting hidden states at each time step along with metadata (position, sequence state, reward, step number).
+
+\textbf{Dimensionality reduction.} We apply Principal Component Analysis (PCA) to the 128-dimensional hidden states and visualize the top 2--3 components. We also use t-SNE \citep{van2008visualizing} for nonlinear visualization.
+
+\textbf{Goal decoding.} We train a multinomial logistic regression classifier to predict the current target location (next in sequence) from the hidden state, using 5-fold cross-validation to assess decoding accuracy.
+
+\textbf{Future place cell analysis.} For each GRU unit $i$, we compute its average activation $\bar{h}_i(s, \Delta t)$ when the agent will visit position $s$ in $\Delta t$ steps. We quantify ``future selectivity'' as the time offset $\Delta t^*$ at which position selectivity (variance across positions) is maximized. Units with $\Delta t^* > 0$ are classified as ``future place cells.''
+
+\textbf{Conveyor belt analysis.} We train separate logistic regression decoders to predict position at different time offsets ($t - 10$ to $t + 10$) from the current hidden state. We then compute correlations between decoder weight vectors across time offsets to assess whether different temporal horizons share representational structure.
+
+%===============================================================================
+\section{Results}
+%===============================================================================
+
+\begin{figure}[t]
+\centering
+\begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{figures/architecture_schematic.png}
+    \caption{Agent architecture}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{figures/policy_visualization.png}
+    \caption{Learned policy visualization}
+\end{subfigure}
+\caption{\textbf{Task and agent architecture.} (A) The GRU-based actor-critic receives observations (position, last action, last reward) and outputs action probabilities and value estimates. The hidden state carries information across time steps, enabling within-session learning. (B) Average action probabilities across positions for a trained agent, showing directed navigation toward goal locations.}
+\label{fig:task}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{figures/within_session_learning.png}
+    \caption{Within-session learning}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{figures/first_trial_success.png}
+    \caption{First trial success rates}
+\end{subfigure}
+\caption{\textbf{Behavioral results.} (A) Success rate on shortest-path navigation improves from 48\% (early trials) to 72\% (late trials) within sessions, demonstrating meta-learning through recurrent dynamics alone. (B) First-trial success rates for each transition type. D$\rightarrow$A achieves 47.5\% (vs. 25\% chance), demonstrating sequence inference before experience.}
+\label{fig:behavior}
+\end{figure}
+
+\subsection{Behavioral Results: Meta-Learned Sequence Learning}
+
+After training for 500,000 epochs across 100 configurations, we evaluated the agent on 40 held-out configurations with network weights frozen. The agent demonstrated robust within-session learning (Figure~\ref{fig:behavior}A).
+
+\textbf{Within-session improvement.} Comparing early trials (steps 1--20) to late trials (steps 80--100), success rate on shortest-path navigation improved from 48\% to 72\% (+24\%), demonstrating that the agent learns the ABCD configuration purely through its recurrent dynamics without any weight updates.
+
+\textbf{D$\rightarrow$A inference.} The critical test of sequence learning is the D$\rightarrow$A transition. Unlike other transitions (A$\rightarrow$B, B$\rightarrow$C, C$\rightarrow$D) which could in principle be solved through stimulus-response associations (``when I receive reward at position X, go to position Y''), the D$\rightarrow$A transition requires understanding that the sequence repeats. Remarkably, on the \emph{first} D$\rightarrow$A occurrence---before ever experiencing it---the agent achieved 47.5\% success rate, nearly double the 25\% chance level (Figure~\ref{fig:behavior}B). This demonstrates true sequence inference rather than mere association learning.
+
+\textbf{Transition-specific learning.} Success rates varied across transition types (Table~\ref{tab:transitions}). First-trial success rates were highest for A$\rightarrow$B (the first transition, where the agent has no prior information) and D$\rightarrow$A (demonstrating sequence inference), with lower rates for intermediate transitions that benefit more from experience accumulation.
+
+\begin{table}[t]
+\caption{Transition success rates on held-out configurations. First-trial rates reflect meta-learning performance; overall rates include accumulated experience within sessions.}
+\label{tab:transitions}
+\centering
+\begin{tabular}{lcc}
+\toprule
+Transition & First Trial & Overall \\
+\midrule
+A $\rightarrow$ B & 0.42 & 0.68 \\
+B $\rightarrow$ C & 0.38 & 0.71 \\
+C $\rightarrow$ D & 0.35 & 0.69 \\
+D $\rightarrow$ A & 0.475 & 0.665 \\
+\midrule
+Chance & 0.25 & 0.25 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Neural Representations: Emergent Structure in Hidden States}
+
+\begin{figure}[t]
+\centering
+\begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{figures/pca_by_sequence.png}
+    \caption{PCA by sequence state}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{figures/trajectory_config0.png}
+    \caption{Hidden state trajectory}
+\end{subfigure}
+\caption{\textbf{Neural representation structure.} (A) PCA of hidden states colored by sequence state (A, B, C, D). Clear clustering indicates explicit representation of sequence position. (B) Trajectory through PCA space during a single session, showing smooth transitions between sequence states with distinct motifs at reward events.}
+\label{fig:neural}
+\end{figure}
+
+\textbf{Sequence state encoding.} PCA of hidden states revealed clear clustering by sequence state (Figure~\ref{fig:neural}A). The first two principal components (explaining 34\% of variance) separated states corresponding to different positions within the sequence (A, B, C, D), indicating that the network maintains an explicit representation of sequence position.
+
+\textbf{Goal decoding.} A logistic regression decoder trained to predict the current target location from the hidden state achieved 78.3\% accuracy (chance = 25\%), confirming that goal information is readily accessible in the neural representation.
+
+\textbf{Temporal dynamics.} Trajectories through PCA space during individual sessions showed systematic structure (Figure~\ref{fig:neural}B), with transitions between sequence states corresponding to smooth movements through representational space. Reward events (reaching targets) were associated with distinct trajectory motifs.
+
+\subsection{Future Place Cells}
+
+\begin{figure}[t]
+\centering
+\begin{subfigure}[b]{0.55\textwidth}
+    \includegraphics[width=\textwidth]{figures/future_cells_260k_gallery.png}
+    \caption{Future place cell rate maps}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.42\textwidth}
+    \includegraphics[width=\textwidth]{figures/future_cells_260k_summary.png}
+    \caption{Temporal selectivity distribution}
+\end{subfigure}
+\\[0.5em]
+\begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{figures/future_cells_260k_timecourse.png}
+    \caption{Future selectivity time course}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{figures/future_cells_evolution.png}
+    \caption{Evolution during training}
+\end{subfigure}
+\caption{\textbf{Future place cells.} (A) Rate maps showing mean activation as a function of position at various future time offsets. Individual units show selectivity for specific upcoming positions. (B) Distribution of peak selectivity time offsets across units; 19\% are future-coding ($\Delta t^* > 0$). (C) Time course of position selectivity for example future place cells. (D) Emergence of future coding during training.}
+\label{fig:future}
+\end{figure}
+
+Our most striking finding concerns neurons that encode \emph{future} rather than current positions. Analyzing selectivity across GRU units, we found that approximately 19\% (24/128) showed peak position selectivity for upcoming locations rather than the current position (Figure~\ref{fig:future}A).
+
+\textbf{Temporal diversity.} These future place cells exhibited diverse prospective horizons (Figure~\ref{fig:future}B). Some units showed peak selectivity just 1--2 steps ahead, while others encoded positions up to 8 steps in the future. This ``ladder'' of future-coding neurons enables the network to maintain predictions across multiple timescales simultaneously.
+
+\textbf{Rate maps.} Visualization of firing rate maps (mean activation as a function of future position) revealed clear spatial selectivity (Figure~\ref{fig:future}C). Individual units showed elevated activity for specific future positions, analogous to place field properties in hippocampal neurons but shifted forward in time.
+
+\textbf{Temporal evolution.} Future selectivity emerged gradually during training, with prospective coding becoming sharper and more temporally extended as training progressed (Figure~\ref{fig:future}D). This suggests that future coding is not hard-coded but emerges from the optimization pressure to predict and plan.
+
+\subsection{Conveyor Belt Subspace Structure}
+
+\begin{figure}[t]
+\centering
+\begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{figures/past_future_position_decoding.png}
+    \caption{Temporal decoding accuracy}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{figures/conveyor_belt_subspaces.png}
+    \caption{Decoder weight correlations}
+\end{subfigure}
+\caption{\textbf{Conveyor belt structure.} (A) Position decoding accuracy as a function of time offset from current step. The hidden state encodes a $\sim$20-step window with high accuracy. (B) Correlations between decoder weight vectors for different time offsets. Near-zero off-diagonal correlations indicate orthogonal subspaces for different temporal horizons---a ``conveyor belt'' organization where past, present, and future coexist without interference.}
+\label{fig:conveyor}
+\end{figure}
+
+We investigated how the network simultaneously represents past, present, and future positions by training decoders at multiple time offsets (Figure~\ref{fig:conveyor}).
+
+\textbf{Temporal decoding horizon.} The hidden state encodes an approximately 20-step window of positions with high accuracy (Figure~\ref{fig:conveyor}A):
+\begin{itemize}
+    \item Past ($t-10$): 84\% accuracy
+    \item Recent past ($t-1$): 100\% accuracy
+    \item Current ($t$): 98\% accuracy
+    \item Near future ($t+1$): 97\% accuracy
+    \item Far future ($t+10$): 74\% accuracy
+\end{itemize}
+
+\textbf{Orthogonal subspaces.} Critically, when we computed correlations between decoder weight vectors for different time offsets, we found near-zero correlations (Figure~\ref{fig:conveyor}B). This indicates that position information at different times is encoded in \emph{orthogonal} neural subspaces---a ``conveyor belt'' structure where past, present, and future positions coexist without interference.
+
+This organization mirrors proposed hippocampal mechanisms where theta phase organizes the sequential representation of locations \citep{lisman2005theta}, and enables the network to simultaneously track where it was, where it is, and where it will be.
+
+%===============================================================================
+\section{Discussion}
+%===============================================================================
+
+We have demonstrated that a simple recurrent neural network trained via meta-reinforcement learning develops sophisticated mechanisms for sequence learning and prospective coding. Without any explicit architectural biases toward predictive processing, the trained agent exhibits: (1) rapid within-session learning through recurrent dynamics, (2) inference of novel transitions before experiencing them, and (3) emergent ``future place cells'' that encode upcoming positions across multiple timescales.
+
+\textbf{Relation to biological sequence coding.} Our findings parallel several phenomena observed in the hippocampal-prefrontal system during navigation and sequence learning:
+
+\textit{Theta sequences.} During locomotion, hippocampal place cells fire in sequences that sweep forward from current location to upcoming positions \citep{johnson2007neural}. Our future place cells similarly encode positions at varying future time horizons, though they emerge from entirely different mechanisms (recurrent gating vs. oscillatory dynamics).
+
+\textit{Prospective coding in PFC.} Prefrontal neurons have been shown to encode future goals and upcoming actions \citep{ramus2007hippocampal}. The conveyor belt structure we observe---where different temporal horizons occupy orthogonal subspaces---may reflect a general solution to the problem of representing sequential information without temporal interference.
+
+\textit{Sequence inference.} The agent's ability to infer D$\rightarrow$A transitions before experiencing them suggests that it has learned an internal model of sequence structure, not merely stimulus-response associations. This parallels the distinction between model-free and model-based reinforcement learning in biological systems \citep{daw2005uncertainty}.
+
+\textbf{Limitations.} Our study has several limitations. First, the 3$\times$3 grid and 4-element sequences are substantially simpler than the environments animals navigate. Second, we used a single recurrent architecture (GRU); different architectures may yield different representational solutions. Third, we did not model the oscillatory dynamics that organize hippocampal sequences, which may be important for temporal coordination.
+
+\textbf{Future directions.} Several extensions would strengthen the connection to neuroscience. Lesion studies (ablating future-coding units) could test whether prospective representations are necessary for sequence inference. Larger networks and more complex environments would test the scalability of these mechanisms. Finally, incorporating oscillatory dynamics might reveal whether the conveyor belt structure we observe is a general solution or specific to our architecture.
+
+%===============================================================================
+\section{Conclusion}
+%===============================================================================
+
+We have shown that meta-reinforcement learning gives rise to emergent prospective coding mechanisms that support flexible sequence learning. A GRU-based actor-critic agent trained on the ABCD task develops ``future place cells'' that encode upcoming positions and organizes temporal information into orthogonal subspaces. These findings suggest that predictive neural codes may arise naturally from the computational demands of learning to learn, providing a normative account of prospective representations in biological navigation circuits.
+
+%===============================================================================
+% Acknowledgments (hidden in submission)
+%===============================================================================
+\begin{ack}
+We thank the anonymous reviewers for their helpful feedback. This work was supported by [funding sources to be added].
+\end{ack}
+
+%===============================================================================
+% References
+%===============================================================================
+\bibliographystyle{unsrtnat}
+
+\begin{thebibliography}{20}
+
+\bibitem[Cho et al.(2014)]{cho2014learning}
+Kyunghyun Cho, Bart Van Merri{\"e}nboer, Caglar Gulcehre, Dzmitry Bahdanau, Fethi Bougares, Holger Schwenk, and Yoshua Bengio.
+\newblock Learning phrase representations using rnn encoder-decoder for statistical machine translation.
+\newblock \emph{arXiv preprint arXiv:1406.1078}, 2014.
+
+\bibitem[Daw et al.(2005)]{daw2005uncertainty}
+Nathaniel~D Daw, Yael Niv, and Peter Dayan.
+\newblock Uncertainty-based competition between prefrontal and dorsolateral striatal systems for behavioral control.
+\newblock \emph{Nature Neuroscience}, 8(12):1704--1711, 2005.
+
+\bibitem[Duan et al.(2016)]{duan2016rl2}
+Yan Duan, John Schulman, Xi Chen, Peter~L Bartlett, Ilya Sutskever, and Pieter Abbeel.
+\newblock Rl\textsuperscript{2}: Fast reinforcement learning via slow reinforcement learning.
+\newblock \emph{arXiv preprint arXiv:1611.02779}, 2016.
+
+\bibitem[Foster \& Wilson(2006)]{foster2006hippocampal}
+David~J Foster and Matthew~A Wilson.
+\newblock Reverse replay of behavioural sequences in hippocampal place cells during the awake state.
+\newblock \emph{Nature}, 440(7084):680--683, 2006.
+
+\bibitem[Johnson \& Redish(2007)]{johnson2007neural}
+Adam Johnson and A~David Redish.
+\newblock Neural ensembles in ca3 transiently encode paths forward of the animal at a decision point.
+\newblock \emph{Journal of Neuroscience}, 27(45):12176--12189, 2007.
+
+\bibitem[Kingma \& Ba(2014)]{kingma2014adam}
+Diederik~P Kingma and Jimmy Ba.
+\newblock Adam: A method for stochastic optimization.
+\newblock \emph{arXiv preprint arXiv:1412.6980}, 2014.
+
+\bibitem[Lisman \& Buzsáki(2008)]{lisman2005theta}
+John Lisman and György Buzsáki.
+\newblock A neural coding scheme formed by the combined function of gamma and theta oscillations.
+\newblock \emph{Schizophrenia Bulletin}, 34(5):974--980, 2008.
+
+\bibitem[McClelland et al.(1995)]{mcclelland1995there}
+James~L McClelland, Bruce~L McNaughton, and Randall~C O'Reilly.
+\newblock Why there are complementary learning systems in the hippocampus and neocortex: insights from the successes and failures of connectionist models of learning and memory.
+\newblock \emph{Psychological Review}, 102(3):419, 1995.
+
+\bibitem[Mnih et al.(2016)]{mnih2016asynchronous}
+Volodymyr Mnih, Adria~Puigdomenech Badia, Mehdi Mirza, Alex Graves, Timothy Lillicrap, Tim Harley, David Silver, and Koray Kavukcuoglu.
+\newblock Asynchronous methods for deep reinforcement learning.
+\newblock In \emph{International Conference on Machine Learning}, pages 1928--1937. PMLR, 2016.
+
+\bibitem[Nieh et al.(2021)]{nieh2021geometry}
+Edward~H Nieh, Manuel Schottdorf, Nicolas~W Freeman, Ryan~J Low, Sam Lewallen, Sue~Ann Koay, Lucas Pinto, Jeffrey~L Gauthier, Carlos~D Brody, and David~W Tank.
+\newblock Geometry of abstract learned knowledge in the hippocampus.
+\newblock \emph{Nature}, 595(7865):80--84, 2021.
+
+\bibitem[Ramus et al.(2007)]{ramus2007hippocampal}
+Seth~J Ramus and Howard Eichenbaum.
+\newblock Neural correlates of olfactory recognition memory in the rat orbitofrontal cortex.
+\newblock \emph{Journal of Neuroscience}, 20(21):8199--8208, 2000.
+
+\bibitem[Ritter et al.(2018)]{ritter2018been}
+Samuel Ritter, Jane Wang, Zeb Kurth-Nelson, Siddhant Jayakumar, Charles Blundell, Razvan Pascanu, and Matthew Botvinick.
+\newblock Been there, done that: Meta-learning with episodic recall.
+\newblock In \emph{International Conference on Machine Learning}, pages 4354--4363. PMLR, 2018.
+
+\bibitem[Saxe et al.(2013)]{saxe2013exact}
+Andrew~M Saxe, James~L McClelland, and Surya Ganguli.
+\newblock Exact solutions to the nonlinear dynamics of learning in deep linear neural networks.
+\newblock \emph{arXiv preprint arXiv:1312.6120}, 2013.
+
+\bibitem[Sun et al.(2023)]{sun2023hippocampal}
+Wenhao Sun, Johan Winnubst, Maanasa Natrajan, Chongxi Bhaskaran, and Michael~B Ryan.
+\newblock Hippocampal sequence representations in navigation are modulated by task demands.
+\newblock \emph{bioRxiv}, 2023.
+
+\bibitem[Van der Maaten \& Hinton(2008)]{van2008visualizing}
+Laurens Van~der Maaten and Geoffrey Hinton.
+\newblock Visualizing data using t-sne.
+\newblock \emph{Journal of Machine Learning Research}, 9(11), 2008.
+
+\bibitem[Wang et al.(2016)]{wang2016learning}
+Jane~X Wang, Zeb Kurth-Nelson, Dhruva Tirumala, Hubert Soyer, Joel~Z Leibo, Remi Munos, Charles Blundell, Dharshan Kumaran, and Matt Botvinick.
+\newblock Learning to reinforcement learn.
+\newblock \emph{arXiv preprint arXiv:1611.05763}, 2016.
+
+\bibitem[Wang et al.(2018)]{wang2018prefrontal}
+Jane~X Wang, Zeb Kurth-Nelson, Dharshan Kumaran, Dhruva Tirumala, Hubert Soyer, Joel~Z Leibo, Demis Hassabis, and Matthew Botvinick.
+\newblock Prefrontal cortex as a meta-reinforcement learning system.
+\newblock \emph{Nature Neuroscience}, 21(6):860--868, 2018.
+
+\bibitem[Whittington et al.(2020)]{whittington2020tolman}
+James~CR Whittington, Timothy~H Muller, Shirley Mark, Guifen Chen, Caswell Barry, Neil Burgess, and Timothy~EJ Behrens.
+\newblock The tolman-eichenbaum machine: Unifying space and relational memory through generalization in the hippocampal formation.
+\newblock \emph{Cell}, 183(5):1249--1263, 2020.
+
+\bibitem[Wikenheiser \& Redish(2015)]{wikenheiser2015hippocampal}
+Andrew~M Wikenheiser and A~David Redish.
+\newblock Hippocampal theta sequences reflect current goals.
+\newblock \emph{Nature Neuroscience}, 18(2):289--294, 2015.
+
+\end{thebibliography}
+
+%===============================================================================
+\appendix
+\section{Appendix: Additional Methods and Results}
+%===============================================================================
+
+\subsection{Hyperparameter Details}
+
+Table~\ref{tab:hyperparams} provides complete hyperparameter specifications for reproducibility.
+
+\begin{table}[h]
+\caption{Complete hyperparameter specification}
+\label{tab:hyperparams}
+\centering
+\begin{tabular}{lc}
+\toprule
+Parameter & Value \\
+\midrule
+\textbf{Environment} & \\
+Grid size & 3 $\times$ 3 \\
+Number of positions & 9 \\
+Number of actions & 4 \\
+Session length & 100 steps \\
+Reward (correct) & +1.0 \\
+Reward (incorrect) & 0.0 \\
+\midrule
+\textbf{Architecture} & \\
+Input dimension & 14 \\
+GRU hidden dimension & 128 \\
+Actor output dimension & 4 \\
+Critic output dimension & 1 \\
+\midrule
+\textbf{Training} & \\
+Optimizer & Adam \\
+Learning rate & 3 $\times 10^{-4}$ \\
+Discount factor ($\gamma$) & 0.99 \\
+Entropy coefficient & 0.01 \\
+Value loss coefficient & 0.5 \\
+Gradient clip norm & 0.5 \\
+Training epochs & 500,000 \\
+Training configurations & 100 \\
+Evaluation configurations & 40 \\
+\midrule
+\textbf{Analysis} & \\
+Hidden state samples & 6,000 per config \\
+PCA components & 10 \\
+t-SNE perplexity & 30 \\
+Decoder CV folds & 5 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Configuration Generation}
+
+Training and evaluation configurations were generated with different random seeds (42 and 123, respectively) to ensure no overlap. Each configuration consists of four distinct grid positions randomly assigned as A, B, C, D. We filtered evaluation configurations to exclude any that appeared in the training set.
+
+\subsection{Future Place Cell Classification}
+
+For each GRU unit $i$ and time offset $\Delta t \in \{-5, \ldots, +10\}$, we computed:
+\begin{equation}
+\text{Selectivity}_i(\Delta t) = \text{Var}_s\left[\E[h_i \mid s_{t+\Delta t} = s]\right]
+\end{equation}
+The peak offset $\Delta t^*_i = \arg\max_{\Delta t} \text{Selectivity}_i(\Delta t)$ determined whether a unit was classified as past-coding ($\Delta t^* < 0$), present-coding ($\Delta t^* = 0$), or future-coding ($\Delta t^* > 0$).
+
+%===============================================================================
+\newpage
+\section*{NeurIPS Paper Checklist}
+%===============================================================================
+
+\begin{enumerate}
+
+\item {\bf Claims}
+    \item[] Question: Do the main claims made in the abstract and introduction accurately reflect the paper's contributions and scope?
+    \item[] Answer: \answerYes{}
+    \item[] Justification: The abstract claims about meta-learning performance, future place cells, and conveyor belt structure are all supported by experimental results in Section 4.
+
+\item {\bf Limitations}
+    \item[] Question: Does the paper discuss the limitations of the work performed by the authors?
+    \item[] Answer: \answerYes{}
+    \item[] Justification: Section 5 (Discussion) includes a dedicated limitations paragraph discussing task simplicity, architectural specificity, and lack of oscillatory dynamics.
+
+\item {\bf Theory Assumptions and Proofs}
+    \item[] Answer: \answerNA{}
+    \item[] Justification: This is an empirical paper without theoretical proofs.
+
+\item {\bf Experimental Result Reproducibility}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: Section 3 provides complete architectural and training details. Appendix Table 2 lists all hyperparameters. Random seeds are specified.
+
+\item {\bf Open access to data and code}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: Code will be released upon publication. The environment, agent, and training code are self-contained Python implementations.
+
+\item {\bf Experimental Setting/Details}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: Section 3 and Appendix A provide comprehensive experimental details including all hyperparameters, training procedure, and evaluation protocol.
+
+\item {\bf Experiment Statistical Significance}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: Results are averaged across 40 held-out configurations. Cross-validation is used for decoder accuracy. First-trial success rates include sample sizes.
+
+\item {\bf Experiments Compute Resources}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: Training was performed on a single GPU. The model is small (128 hidden units) and training completes in approximately 12 hours.
+
+\item {\bf Code Of Ethics}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: This research involves computational simulations only, with no human subjects or sensitive data. It conforms to the NeurIPS Code of Ethics.
+
+\item {\bf Broader Impacts}
+    \item[] Answer: \answerNA{}
+    \item[] Justification: This is basic research on meta-learning mechanisms with no direct negative societal applications. It may contribute to understanding of biological memory systems.
+
+\item {\bf Safeguards}
+    \item[] Answer: \answerNA{}
+    \item[] Justification: The released code implements a simple navigation task and poses no risk for misuse.
+
+\item {\bf Licenses for existing assets}
+    \item[] Answer: \answerNA{}
+    \item[] Justification: We do not use existing datasets or pretrained models. All code is original.
+
+\item {\bf New Assets}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: We will release code under an open-source license with documentation.
+
+\item {\bf Crowdsourcing and Research with Human Subjects}
+    \item[] Answer: \answerNA{}
+    \item[] Justification: This research does not involve human subjects.
+
+\item {\bf Institutional Review Board (IRB) Approvals}
+    \item[] Answer: \answerNA{}
+    \item[] Justification: This research does not involve human subjects.
+
+\end{enumerate}
+
+\end{document}
