@@ -67,5 +67,8 @@ experiments/*/figures/
 *.log
 logs/
 
+# Overleaf exports
+from_overleaf/
+
 # Uncomment to exclude large PDFs
-# *.pdf
+*.pdf
